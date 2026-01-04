@@ -19,9 +19,128 @@ const showLoginLink = document.getElementById('showLogin');
 const searchModal = document.getElementById('searchModal');
 const closeModal = document.getElementById('closeModal');
 
-// Initialize users from localStorage
-let siasatanRecords = JSON.parse(localStorage.getItem('siasatanRecords')) || [];
-let users = JSON.parse(localStorage.getItem('users')) || [];
+// Loading overlay
+const loadingOverlay = document.getElementById('loadingOverlay');
+
+// Global variables for data
+let siasatanRecords = [];
+let users = [];
+let currentUser = null;
+
+// Helper functions for loading
+function showLoading(text = 'Memuat data...') {
+    loadingOverlay.querySelector('.loading-text').textContent = text;
+    loadingOverlay.classList.add('active');
+}
+
+function hideLoading() {
+    loadingOverlay.classList.remove('active');
+}
+
+// Migrate localStorage data to Firestore (one-time migration)
+async function migrateLocalDataToFirestore() {
+    try {
+        const localUsers = JSON.parse(localStorage.getItem('users')) || [];
+        const localRecords = JSON.parse(localStorage.getItem('siasatanRecords')) || [];
+        
+        if (localUsers.length > 0) {
+            showLoading('Memindahkan data pengguna ke cloud...');
+            for (const user of localUsers) {
+                await usersCollection.doc(user.noBadan).set(user);
+            }
+            console.log(`${localUsers.length} pengguna dipindahkan ke Firestore`);
+        }
+        
+        if (localRecords.length > 0) {
+            showLoading('Memindahkan data kertas siasatan ke cloud...');
+            for (const record of localRecords) {
+                await siasatanCollection.doc(record.id).set(record);
+            }
+            console.log(`${localRecords.length} rekod dipindahkan ke Firestore`);
+        }
+        
+        // Clear localStorage after migration
+        if (localUsers.length > 0 || localRecords.length > 0) {
+            localStorage.removeItem('users');
+            localStorage.removeItem('siasatanRecords');
+            alert(`✅ Data berjaya dipindahkan ke cloud!\n\n${localUsers.length} pengguna dan ${localRecords.length} rekod kini boleh diakses dari mana-mana peranti.`);
+        }
+    } catch (error) {
+        console.error('Error migrating data:', error);
+    }
+}
+
+// Load users from Firestore
+async function loadUsers() {
+    try {
+        const snapshot = await usersCollection.get();
+        users = [];
+        snapshot.forEach(doc => {
+            users.push(doc.data());
+        });
+        return users;
+    } catch (error) {
+        console.error('Error loading users:', error);
+        return [];
+    }
+}
+
+// Load siasatan records from Firestore
+async function loadSiasatanRecords() {
+    try {
+        const snapshot = await siasatanCollection.orderBy('timestamp', 'desc').get();
+        siasatanRecords = [];
+        snapshot.forEach(doc => {
+            siasatanRecords.push(doc.data());
+        });
+        return siasatanRecords;
+    } catch (error) {
+        console.error('Error loading records:', error);
+        return [];
+    }
+}
+
+// Initialize app - load data from Firestore
+async function initializeApp() {
+    showLoading('Memuat data dari cloud...');
+    
+    try {
+        // Check if migration is needed
+        await migrateLocalDataToFirestore();
+        
+        // Load data from Firestore
+        await loadUsers();
+        await loadSiasatanRecords();
+        
+        // Check if user is logged in
+        const storedUser = localStorage.getItem('currentUser');
+        if (storedUser) {
+            currentUser = JSON.parse(storedUser);
+            // Verify user still exists in Firestore
+            const userDoc = await usersCollection.doc(currentUser.noBadan).get();
+            if (userDoc.exists) {
+                document.getElementById('displayNama').textContent = currentUser.namaPegawai;
+                document.getElementById('displayBadan').textContent = currentUser.noBadan;
+                document.getElementById('displayBahagian').textContent = currentUser.bahagian;
+                showPage(dashboardPage);
+                displayRecords();
+            } else {
+                localStorage.removeItem('currentUser');
+                currentUser = null;
+            }
+        }
+        
+        hideLoading();
+    } catch (error) {
+        console.error('Error initializing app:', error);
+        hideLoading();
+        alert('Ralat memuat data. Sila refresh halaman.');
+    }
+}
+
+// Initialize users from localStorage (REMOVED - now using Firestore)
+// let siasatanRecords = JSON.parse(localStorage.getItem('siasatanRecords')) || [];
+// let users = JSON.parse(localStorage.getItem('users')) || [];
 
 // Storage limit constants (2GB in bytes)
 const STORAGE_LIMIT = 2 * 1024 * 1024 * 1024; // 2GB
@@ -103,73 +222,104 @@ showLoginLink.addEventListener('click', (e) => {
 });
 
 // Handle registration
-registerForm.addEventListener('submit', (e) => {
+registerForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     
     const namaPegawai = document.getElementById('namaPegawai').value.trim();
     const noBadan = document.getElementById('noBadan').value.trim();
     const bahagian = document.getElementById('bahagian').value.trim();
     
-    // Check if user already exists
-    const existingUser = users.find(user => user.noBadan === noBadan);
+    showLoading('Menyemak pendaftaran...');
     
-    if (existingUser) {
-        alert('No. Badan ini sudah didaftarkan!');
-        return;
+    try {
+        // Check if user already exists in Firestore
+        const userDoc = await usersCollection.doc(noBadan).get();
+        
+        if (userDoc.exists) {
+            hideLoading();
+            alert('No. Badan ini sudah didaftarkan!');
+            return;
+        }
+        
+        // Add new user to Firestore
+        const newUser = {
+            namaPegawai,
+            noBadan,
+            bahagian,
+            createdAt: new Date().toISOString()
+        };
+        
+        await usersCollection.doc(noBadan).set(newUser);
+        
+        // Update local array
+        users.push(newUser);
+        
+        hideLoading();
+        alert('✅ Pendaftaran berjaya!\n\nAkaun anda kini boleh diakses dari mana-mana peranti.\nSila log masuk menggunakan No. Badan anda.');
+        
+        // Clear form
+        registerForm.reset();
+        
+        // Show login page
+        showPage(loginPage);
+    } catch (error) {
+        hideLoading();
+        console.error('Error registering user:', error);
+        alert('❌ Ralat semasa pendaftaran. Sila cuba lagi.');
     }
-    
-    // Add new user
-    const newUser = {
-        namaPegawai,
-        noBadan,
-        bahagian
-    };
-    
-    users.push(newUser);
-    localStorage.setItem('users', JSON.stringify(users));
-    
-    alert('Pendaftaran berjaya! Sila log masuk menggunakan No. Badan anda.');
-    
-    // Clear form
-    registerForm.reset();
-    
-    // Show login page
-    showPage(loginPage);
 });
 
 // Handle login
-loginForm.addEventListener('submit', (e) => {
+loginForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     
     const loginBadan = document.getElementById('loginBadan').value.trim();
     
-    // Find user
-    const user = users.find(u => u.noBadan === loginBadan);
+    showLoading('Menyemak akaun...');
     
-    if (user) {
-        // Store current user
-        localStorage.setItem('currentUser', JSON.stringify(user));
+    try {
+        // Find user in Firestore
+        const userDoc = await usersCollection.doc(loginBadan).get();
         
-        // Display user info
-        document.getElementById('displayNama').textContent = user.namaPegawai;
-        document.getElementById('displayBadan').textContent = user.noBadan;
-        document.getElementById('displayBahagian').textContent = user.bahagian;
-        
-        // Clear form
-        loginForm.reset();
-        
-        // Show dashboard
-        showPage(dashboardPage);
-        
-        // Display records
-        displayRecords();
-    } else {
-        alert('No. Badan tidak dijumpai! Sila daftar terlebih dahulu.');
+        if (userDoc.exists) {
+            const user = userDoc.data();
+            
+            // Store current user
+            currentUser = user;
+            localStorage.setItem('currentUser', JSON.stringify(user));
+            
+            // Display user info
+            document.getElementById('displayNama').textContent = user.namaPegawai;
+            document.getElementById('displayBadan').textContent = user.noBadan;
+            document.getElementById('displayBahagian').textContent = user.bahagian;
+            
+            // Clear form
+            loginForm.reset();
+            
+            // Load siasatan records
+            await loadSiasatanRecords();
+            
+            hideLoading();
+            
+            // Show dashboard
+            showPage(dashboardPage);
+            
+            // Display records
+            displayRecords();
+        } else {
+            hideLoading();
+            alert('No. Badan tidak dijumpai! Sila daftar terlebih dahulu.');
+        }
+    } catch (error) {
+        hideLoading();
+        console.error('Error logging in:', error);
+        alert('❌ Ralat semasa log masuk. Sila cuba lagi.');
     }
 });
 
 // Handle logout
 logoutBtn.addEventListener('click', () => {
+    currentUser = null;
     localStorage.removeItem('currentUser');
     showPage(loginPage);
 });
@@ -177,6 +327,9 @@ logoutBtn.addEventListener('click', () => {
 // Generate QR Code on page load
 window.addEventListener('DOMContentLoaded', function() {
     generateSearchQRCode();
+    
+    // Initialize app with Firebase
+    initializeApp();
 });
 
 // Function to generate QR code for search
@@ -411,65 +564,85 @@ function performSearch(searchBadan) {
 }
 
 // Handle kertas siasatan form
-siasatanForm.addEventListener('submit', (e) => {
+siasatanForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     
-    const currentUser = JSON.parse(localStorage.getItem('currentUser'));
+    if (!currentUser) {
+        alert('Sila log masuk terlebih dahulu.');
+        return;
+    }
     
-    if (editingRecordId) {
-        // Update existing record
-        const recordIndex = siasatanRecords.findIndex(r => r.id === editingRecordId);
-        
-        if (recordIndex !== -1) {
-            siasatanRecords[recordIndex] = {
-                ...siasatanRecords[recordIndex],
+    showLoading('Menyimpan rekod...');
+    
+    try {
+        if (editingRecordId) {
+            // Update existing record in Firestore
+            const updatedRecord = {
                 pegawaiPenyiasat: document.getElementById('pegawaiPenyiasat').value.trim(),
                 noKertasSiasatan: document.getElementById('noKertasSiasatan').value.trim(),
                 noReport: document.getElementById('noReport').value.trim(),
                 seksyen: document.getElementById('seksyen').value.trim(),
-                timestamp: new Date().toLocaleString('ms-MY') + ' (Dikemaskini)'
+                timestamp: new Date().toLocaleString('ms-MY') + ' (Dikemaskini)',
+                updatedAt: new Date().toISOString()
             };
             
-            localStorage.setItem('siasatanRecords', JSON.stringify(siasatanRecords));
-            alert('Rekod berjaya dikemaskini!');
+            await siasatanCollection.doc(editingRecordId).update(updatedRecord);
             
-            // Check storage limit
-            checkStorageLimit();
+            // Update local array
+            const recordIndex = siasatanRecords.findIndex(r => r.id === editingRecordId);
+            if (recordIndex !== -1) {
+                siasatanRecords[recordIndex] = {
+                    ...siasatanRecords[recordIndex],
+                    ...updatedRecord
+                };
+            }
+            
+            hideLoading();
+            alert('✅ Rekod berjaya dikemaskini!\n\nPerubahan akan kelihatan di semua peranti.');
+            
+            // Reset editing mode
+            editingRecordId = null;
+            const submitBtn = siasatanForm.querySelector('button[type="submit"]');
+            submitBtn.textContent = 'Simpan Rekod';
+            submitBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+            
+        } else {
+            // Create new record in Firestore
+            const newRecordId = Date.now().toString();
+            const newRecord = {
+                id: newRecordId,
+                pegawaiPenyiasat: document.getElementById('pegawaiPenyiasat').value.trim(),
+                noKertasSiasatan: document.getElementById('noKertasSiasatan').value.trim(),
+                noReport: document.getElementById('noReport').value.trim(),
+                seksyen: document.getElementById('seksyen').value.trim(),
+                submittedBy: currentUser.namaPegawai,
+                noBadan: currentUser.noBadan,
+                bahagian: currentUser.bahagian,
+                timestamp: new Date().toLocaleString('ms-MY'),
+                createdAt: new Date().toISOString(),
+                tracking: []
+            };
+            
+            await siasatanCollection.doc(newRecordId).set(newRecord);
+            
+            // Update local array
+            siasatanRecords.push(newRecord);
+            
+            hideLoading();
+            alert('✅ Rekod berjaya disimpan!\n\nRekod ini boleh diakses dari mana-mana peranti.');
         }
         
-        // Reset editing mode
-        editingRecordId = null;
-        const submitBtn = siasatanForm.querySelector('button[type="submit"]');
-        submitBtn.textContent = 'Simpan Rekod';
-        submitBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+        // Clear form
+        siasatanForm.reset();
         
-    } else {
-        // Create new record
-        const newRecord = {
-            id: Date.now(),
-            pegawaiPenyiasat: document.getElementById('pegawaiPenyiasat').value.trim(),
-            noKertasSiasatan: document.getElementById('noKertasSiasatan').value.trim(),
-            noReport: document.getElementById('noReport').value.trim(),
-            seksyen: document.getElementById('seksyen').value.trim(),
-            submittedBy: currentUser.namaPegawai,
-            noBadan: currentUser.noBadan,
-            bahagian: currentUser.bahagian,
-            timestamp: new Date().toLocaleString('ms-MY')
-        };
+        // Refresh records display
+        displayRecords();
         
-        siasatanRecords.push(newRecord);
-        localStorage.setItem('siasatanRecords', JSON.stringify(siasatanRecords));
-        alert('Rekod berjaya disimpan!');
-        
-        // Check storage limit
-        checkStorageLimit();
+    } catch (error) {
+        hideLoading();
+        console.error('Error saving record:', error);
+        alert('❌ Ralat menyimpan rekod. Sila cuba lagi.');
     }
-    
-    // Clear form
-    siasatanForm.reset();
-    
-    // Refresh records display
-    displayRecords();
 });
 
 // Function to display records
@@ -478,7 +651,7 @@ function displayRecords() {
     recordsList.innerHTML = '';
     
     // Get current user
-    const currentUser = JSON.parse(localStorage.getItem('currentUser'));
+    if (!currentUser) return;
     
     // Filter records for current user only
     const userRecords = siasatanRecords.filter(record => record.noBadan === currentUser.noBadan);
@@ -642,20 +815,29 @@ function printQRCode(qrId, ksNumber) {
 }
 
 // Function to delete a record
-function deleteRecord(recordId, ksNumber) {
-    if (confirm(`Adakah anda pasti mahu memadam Kertas Siasatan ${ksNumber}?\n\nAmaran: Tindakan ini tidak boleh dibatalkan!`)) {
-        // Find and remove the record
-        const recordIndex = siasatanRecords.findIndex(r => r.id === recordId);
+async function deleteRecord(recordId, ksNumber) {
+    if (confirm(`Adakah anda pasti mahu memadam Kertas Siasatan ${ksNumber}?\n\nAmaran: Tindakan ini tidak boleh dibatalkan dan akan dipadam dari semua peranti!`)) {
+        showLoading('Memadam rekod...');
         
-        if (recordIndex !== -1) {
-            siasatanRecords.splice(recordIndex, 1);
-            localStorage.setItem('siasatanRecords', JSON.stringify(siasatanRecords));
-            alert('Rekod berjaya dipadam!');
+        try {
+            // Delete from Firestore
+            await siasatanCollection.doc(recordId.toString()).delete();
+            
+            // Remove from local array
+            const recordIndex = siasatanRecords.findIndex(r => r.id === recordId);
+            if (recordIndex !== -1) {
+                siasatanRecords.splice(recordIndex, 1);
+            }
+            
+            hideLoading();
+            alert('✅ Rekod berjaya dipadam!');
             
             // Refresh records display
             displayRecords();
-        } else {
-            alert('Ralat: Rekod tidak dijumpai!');
+        } catch (error) {
+            hideLoading();
+            console.error('Error deleting record:', error);
+            alert('❌ Ralat memadam rekod. Sila cuba lagi.');
         }
     }
 }
@@ -717,36 +899,49 @@ function displayTrackingTable(trackingData) {
 }
 
 // Handle tracking form submission
-trackingForm.addEventListener('submit', (e) => {
+trackingForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     
     const record = siasatanRecords.find(r => r.id === currentTrackingRecordId);
     
     if (record) {
-        const newTracking = {
-            pergerakan: document.getElementById('pergerakan').value.trim(),
-            io: document.getElementById('io').value.trim(),
-            sio: document.getElementById('sio').value.trim(),
-            ipk: document.getElementById('ipk').value.trim(),
-            tpr: document.getElementById('tpr').value.trim(),
-            mahkamah: document.getElementById('mahkamah').value.trim(),
-            kusFile: document.getElementById('kusFile').value.trim(),
-            lainLain: document.getElementById('lainLain').value.trim()
-        };
+        showLoading('Menambah pergerakan...');
         
-        if (!record.tracking) {
-            record.tracking = [];
+        try {
+            const newTracking = {
+                pergerakan: document.getElementById('pergerakan').value.trim(),
+                io: document.getElementById('io').value.trim(),
+                sio: document.getElementById('sio').value.trim(),
+                ipk: document.getElementById('ipk').value.trim(),
+                tpr: document.getElementById('tpr').value.trim(),
+                mahkamah: document.getElementById('mahkamah').value.trim(),
+                kusFile: document.getElementById('kusFile').value.trim(),
+                lainLain: document.getElementById('lainLain').value.trim(),
+                timestamp: new Date().toISOString()
+            };
+            
+            if (!record.tracking) {
+                record.tracking = [];
+            }
+            
+            record.tracking.push(newTracking);
+            
+            // Update in Firestore
+            await siasatanCollection.doc(currentTrackingRecordId.toString()).update({
+                tracking: record.tracking,
+                timestamp: new Date().toLocaleString('ms-MY') + ' (Dikemaskini)',
+                updatedAt: new Date().toISOString()
+            });
+            
+            hideLoading();
+            alert('✅ Pergerakan berjaya ditambah!\n\nKemaskini akan kelihatan di semua peranti.');
+            trackingForm.reset();
+            displayTrackingTable(record.tracking);
+        } catch (error) {
+            hideLoading();
+            console.error('Error adding tracking:', error);
+            alert('❌ Ralat menambah pergerakan. Sila cuba lagi.');
         }
-        
-        record.tracking.push(newTracking);
-        localStorage.setItem('siasatanRecords', JSON.stringify(siasatanRecords));
-        
-        alert('Pergerakan berjaya ditambah!');
-        trackingForm.reset();
-        displayTrackingTable(record.tracking);
-        
-        // Check storage limit
-        checkStorageLimit();
     }
 });
 
@@ -755,54 +950,6 @@ backToDashboard.addEventListener('click', () => {
     showPage(dashboardPage);
     displayRecords();
 });
-
-// Check if user is already logged in
-window.addEventListener('load', () => {
-    const currentUser = JSON.parse(localStorage.getItem('currentUser'));
-    
-    // Check for tracking parameter in URL (from QR code scan)
-    const urlParams = new URLSearchParams(window.location.search);
-    const trackId = urlParams.get('track');
-    
-    if (currentUser) {
-        document.getElementById('displayNama').textContent = currentUser.namaPegawai;
-        document.getElementById('displayBadan').textContent = currentUser.noBadan;
-        document.getElementById('displayBahagian').textContent = currentUser.bahagian;
-        showPage(dashboardPage);
-        displayRecords();
-        
-        // If tracking ID exists, open tracking page
-        if (trackId) {
-            const recordId = parseInt(trackId);
-            const record = siasatanRecords.find(r => r.id === recordId);
-            
-            if (record) {
-                // Small delay to ensure page is loaded
-                setTimeout(() => {
-                    editRecord(recordId);
-                    // Clear URL parameter
-                    window.history.replaceState({}, document.title, window.location.pathname);
-                }, 100);
-            }
-        }
-    } else if (trackId) {
-        // If not logged in but has tracking ID, verify user first
-        const noBadanInput = prompt('Sila masukkan No. Badan anda untuk akses:');
-        
-        if (noBadanInput) {
-            const trimmedInput = noBadanInput.trim();
-            const userExists = users.find(u => u.noBadan === trimmedInput);
-            
-            if (userExists) {
-                const recordId = parseInt(trackId);
-                const record = siasatanRecords.find(r => r.id === recordId);
-                
-                if (record) {
-                    currentTrackingRecordId = recordId;
-                    
-                    // Initialize tracking array if doesn't exist
-                    if (!record.tracking) {
-                        record.tracking = [];
                     }
                     
                     // Display record info
